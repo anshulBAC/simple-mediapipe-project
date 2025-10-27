@@ -1,9 +1,7 @@
 """
-Tongue Detection Meme Display
-A MediaPipe + OpenCV application that detects when your tongue is out
-and displays different meme images accordingly.
-
-See TUTORIAL.md for detailed explanations
+Enhanced Tongue Detection Meme Display
+Detects: Tongue, Fingers, Teeth, and Normal state
+A MediaPipe + OpenCV application that displays different hamster memes
 """
 
 import cv2
@@ -15,261 +13,315 @@ import os
 # CONFIGURATION SETTINGS
 # ============================================================================
 
-# Window settings - approximately half monitor size (1920x1080 / 2)
+# Window settings
 WINDOW_WIDTH = 960
 WINDOW_HEIGHT = 720
 
-# Tongue detection threshold - adjust this value to change sensitivity
-# Higher value = less sensitive (requires wider mouth opening)
-# Lower value = more sensitive (detects smaller mouth openings)
-# Recommended range: 0.02 - 0.05
-TONGUE_OUT_THRESHOLD = 0.03
+# Detection thresholds - adjust these values to change sensitivity
+TONGUE_OUT_THRESHOLD = 0.03      # Mouth opening for tongue
+TEETH_SHOWING_THRESHOLD = 0.025  # Wide smile showing teeth
+FINGER_CONFIDENCE = 0.7          # Hand detection confidence
 
 # ============================================================================
 # MEDIAPIPE INITIALIZATION
 # ============================================================================
 
 # Initialize MediaPipe Face Mesh
-# This creates a face detection model that tracks 468 facial landmarks
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
-    min_detection_confidence=0.5,  # Confidence threshold for initial detection
-    min_tracking_confidence=0.5,   # Confidence threshold for tracking
-    max_num_faces=1                # We only need to track one face
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5,
+    max_num_faces=1
+)
+
+# Initialize MediaPipe Hands for finger detection
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    min_detection_confidence=FINGER_CONFIDENCE,
+    min_tracking_confidence=0.5,
+    max_num_hands=2
 )
 
 def is_tongue_out(face_landmarks):
     """
-    Detect if tongue is out by analyzing mouth landmarks.
-    
-    This function uses MediaPipe Face Mesh landmarks to determine if the
-    mouth is open wide enough to indicate the tongue is sticking out.
-    
-    Key landmarks used:
-    - Landmark #13: Upper lip center
-    - Landmark #14: Lower lip center
-    - Landmark #0: Nose tip (reference point)
-    - Landmark #17: Chin bottom
-    
-    MediaPipe provides 468 total landmarks. See the landmark map:
-    https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
-    
-    Args:
-        face_landmarks: MediaPipe face landmarks object containing 468 3D points
-        
-    Returns:
-        bool: True if tongue appears to be out, False otherwise
+    Detect if tongue is out by analyzing mouth opening.
+    Returns True if mouth is open wide (tongue likely out).
     """
-    
-    # Get mouth landmarks (normalized coordinates 0.0 to 1.0)
-    upper_lip = face_landmarks.landmark[13]  # Upper lip center point
-    lower_lip = face_landmarks.landmark[14]  # Lower lip center point
-    
-    # Additional landmarks for reference (not currently used, but available)
-    mouth_top = face_landmarks.landmark[0]     # Nose tip
-    mouth_bottom = face_landmarks.landmark[17] # Chin bottom
-    
-    # Calculate vertical distance between lips
-    # Since coordinates are normalized (0.0-1.0), the result is a percentage
-    # of the total frame height
+    upper_lip = face_landmarks.landmark[13]
+    lower_lip = face_landmarks.landmark[14]
     mouth_opening = abs(upper_lip.y - lower_lip.y)
     
-    # Optional: Print for debugging/calibration
-    # Uncomment the line below to see mouth opening values in real-time
+    # Debug: Uncomment to see values
     # print(f"Mouth opening: {mouth_opening:.4f}")
     
-    # Compare to threshold and return result
-    # If mouth opening exceeds threshold, tongue is considered "out"
     return mouth_opening > TONGUE_OUT_THRESHOLD
+
+def is_showing_teeth(face_landmarks):
+    """
+    Detect if teeth are showing (big smile/grin).
+    Checks for wide horizontal mouth opening with moderate vertical opening.
+    """
+    # Mouth corners
+    left_corner = face_landmarks.landmark[61]
+    right_corner = face_landmarks.landmark[291]
+    
+    # Mouth center points
+    upper_lip = face_landmarks.landmark[13]
+    lower_lip = face_landmarks.landmark[14]
+    
+    # Calculate mouth width and height
+    mouth_width = abs(right_corner.x - left_corner.x)
+    mouth_height = abs(upper_lip.y - lower_lip.y)
+    
+    # Wide smile: width is large, height is moderate (not fully open like tongue)
+    is_wide_smile = mouth_width > 0.08
+    is_moderate_opening = 0.015 < mouth_height < TONGUE_OUT_THRESHOLD
+    
+    # Debug: Uncomment to see values
+    # print(f"Width: {mouth_width:.4f}, Height: {mouth_height:.4f}")
+    
+    return is_wide_smile and is_moderate_opening
+
+def count_extended_fingers(hand_landmarks):
+    """
+    Count how many fingers are extended/raised.
+    Returns number of fingers up (0-5).
+    """
+    # Finger tip landmarks: [8, 12, 16, 20] for index, middle, ring, pinky
+    # Thumb tip: 4
+    # Palm base: 0
+    
+    fingers_up = 0
+    
+    # Check thumb (special case - uses x-coordinate)
+    thumb_tip = hand_landmarks.landmark[4]
+    thumb_base = hand_landmarks.landmark[2]
+    if abs(thumb_tip.x - thumb_base.x) > 0.05:
+        fingers_up += 1
+    
+    # Check other four fingers (use y-coordinate)
+    finger_tips = [8, 12, 16, 20]
+    finger_pips = [6, 10, 14, 18]  # Middle joints
+    
+    for tip, pip in zip(finger_tips, finger_pips):
+        tip_y = hand_landmarks.landmark[tip].y
+        pip_y = hand_landmarks.landmark[pip].y
+        
+        # If tip is above the middle joint, finger is extended
+        if tip_y < pip_y - 0.03:
+            fingers_up += 1
+    
+    return fingers_up
 
 def main():
     """
-    Main application loop.
-    
-    This function:
-    1. Loads the meme images
-    2. Initializes the webcam
-    3. Creates display windows
-    4. Runs the main detection loop
-    5. Handles cleanup on exit
+    Main application loop with multi-detection support.
     """
     
-    # ========================================================================
-    # STEP 1: Load and prepare meme images
-    # ========================================================================
-    
     print("=" * 60)
-    print("Tongue Detection Meme Display")
+    print("Enhanced Hamster Meme Display")
     print("=" * 60)
     
-    # Check if required image files exist
-    if not os.path.exists('apple.png'):
-        print("\n[ERROR] apple.png not found!")
-        print("Please add this image to the project directory.")
-        print("This image is displayed when tongue is NOT out.")
-        return
+    # ========================================================================
+    # STEP 1: Load all meme images
+    # ========================================================================
     
-    if not os.path.exists('appletongue.png'):
-        print("\n[ERROR] appletongue.png not found!")
-        print("Please add this image to the project directory.")
-        print("This image is displayed when tongue IS out.")
-        return
+    images = {
+        'normal': 'hamsternormal.png',
+        'tongue': 'hamster_tongue.png',
+        'finger': 'hamsterfinger.png',
+        'teeth': 'hamstermeme.png'
+    }
     
-    # Load images using OpenCV (images are loaded in BGR format)
-    apple_img = cv2.imread('apple.png')
-    appletongue_img = cv2.imread('appletongue.png')
+    loaded_images = {}
     
-    # Verify images loaded successfully
-    if apple_img is None or appletongue_img is None:
-        print("\n[ERROR] Could not load meme images.")
-        print("Please check that the files are valid PNG images.")
-        return
+    for key, filename in images.items():
+        if not os.path.exists(filename):
+            print(f"\n[ERROR] {filename} not found!")
+            print(f"Please add this image to the project directory.")
+            return
+        
+        img = cv2.imread(filename)
+        if img is None:
+            print(f"\n[ERROR] Could not load {filename}.")
+            print("Please check that the file is a valid PNG image.")
+            return
+        
+        # Resize to window size
+        loaded_images[key] = cv2.resize(img, (WINDOW_WIDTH, WINDOW_HEIGHT))
+        print(f"[OK] Loaded {filename}")
     
-    print("[OK] Meme images loaded successfully!")
-    
-    # Resize images to fit the output window
-    # This ensures consistent display regardless of original image size
-    apple_img = cv2.resize(apple_img, (WINDOW_WIDTH, WINDOW_HEIGHT))
-    appletongue_img = cv2.resize(appletongue_img, (WINDOW_WIDTH, WINDOW_HEIGHT))
+    print("\n[OK] All images loaded successfully!")
     
     # ========================================================================
     # STEP 2: Initialize webcam
     # ========================================================================
     
-    # Open the default webcam (index 0)
-    # If you have multiple cameras, try changing 0 to 1, 2, etc.
     cap = cv2.VideoCapture(0)
     
     if not cap.isOpened():
         print("\n[ERROR] Could not open webcam.")
-        print("Please check:")
-        print("  - Webcam is connected")
-        print("  - No other application is using the webcam")
-        print("  - Webcam permissions are enabled")
         return
     
-    # Set webcam resolution (may not match exactly depending on hardware)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WINDOW_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, WINDOW_HEIGHT)
     
-    print("[OK] Webcam initialized successfully!")
+    print("[OK] Webcam initialized!")
     
     # ========================================================================
     # STEP 3: Create display windows
     # ========================================================================
     
-    # Create two windows: one for camera input, one for meme output
     cv2.namedWindow('Camera Input', cv2.WINDOW_NORMAL)
-    cv2.namedWindow('Meme Output', cv2.WINDOW_NORMAL)
+    cv2.namedWindow('Hamster Meme Output', cv2.WINDOW_NORMAL)
     
-    # Set window sizes
     cv2.resizeWindow('Camera Input', WINDOW_WIDTH, WINDOW_HEIGHT)
-    cv2.resizeWindow('Meme Output', WINDOW_WIDTH, WINDOW_HEIGHT)
+    cv2.resizeWindow('Hamster Meme Output', WINDOW_WIDTH, WINDOW_HEIGHT)
     
     print("\n" + "=" * 60)
     print("[OK] Application started successfully!")
     print("=" * 60)
-    print("\n[CAMERA] Windows opened")
-    print("[TONGUE] Stick your tongue out to change the meme!")
-    print("[QUIT] Press 'q' to quit\n")
+    print("\n[GESTURES]")
+    print("  😛 Stick tongue out → Tongue hamster")
+    print("  🤘 Show fingers → Finger hamster")
+    print("  😁 Big smile (show teeth) → Meme hamster")
+    print("  😐 Normal face → Normal hamster")
+    print("\n[CONTROLS]")
+    print("  Press 'q' to quit")
+    print("  Press 'd' to toggle debug info\n")
     
-    # Default state - start with normal apple image
-    current_meme = apple_img.copy()
+    # Default state
+    current_meme = loaded_images['normal'].copy()
+    show_debug = False
     
     # ========================================================================
     # STEP 4: Main detection loop
     # ========================================================================
     
     while True:
-        # Read a frame from the webcam
         ret, frame = cap.read()
         
-        # Check if frame was captured successfully
         if not ret:
             print("\n[ERROR] Could not read frame from webcam.")
             break
         
-        # Flip frame horizontally for mirror effect (makes it easier to use)
-        # Without this, moving left would make the image move right
+        # Flip frame for mirror effect
         frame = cv2.flip(frame, 1)
-        
-        # Ensure frame matches our target window size
         frame = cv2.resize(frame, (WINDOW_WIDTH, WINDOW_HEIGHT))
         
-        # Convert BGR (OpenCV format) to RGB (MediaPipe format)
-        # OpenCV uses BGR color order, but MediaPipe expects RGB
+        # Convert to RGB for MediaPipe
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Process the frame with MediaPipe Face Mesh
-        # This detects faces and returns 468 facial landmarks per face
-        results = face_mesh.process(rgb_frame)
+        # Process face and hands
+        face_results = face_mesh.process(rgb_frame)
+        hand_results = hands.process(rgb_frame)
         
         # ====================================================================
-        # Detect tongue and select appropriate meme
+        # Detect gestures and select appropriate meme
         # ====================================================================
         
-        if results.multi_face_landmarks:
-            # Face detected! Process landmarks
-            for face_landmarks in results.multi_face_landmarks:
-                # Check if tongue is out using our detection function
+        detected_gesture = "No face detected"
+        fingers_count = 0
+        
+        # Check for hand gestures first (highest priority)
+        if hand_results.multi_hand_landmarks:
+            for hand_landmarks in hand_results.multi_hand_landmarks:
+                fingers_count = count_extended_fingers(hand_landmarks)
+                
+                # If 1 or more fingers are up, show finger hamster
+                if fingers_count >= 1:
+                    current_meme = loaded_images['finger'].copy()
+                    detected_gesture = f"FINGER GESTURE! ({fingers_count} fingers)"
+                    
+                    # Draw hand skeleton on camera feed (optional)
+                    mp.solutions.drawing_utils.draw_landmarks(
+                        frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                    
+                    break  # Found a hand, no need to check face
+        
+        # If no hand gesture, check face expressions
+        elif face_results.multi_face_landmarks:
+            for face_landmarks in face_results.multi_face_landmarks:
+                
+                # Priority 1: Tongue out (most distinctive)
                 if is_tongue_out(face_landmarks):
-                    # Tongue detected - show tongue meme
-                    current_meme = appletongue_img.copy()
-                    
-                    # Add visual indicator on camera feed (green text)
-                    cv2.putText(frame, "TONGUE OUT!", (10, 50), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+                    current_meme = loaded_images['tongue'].copy()
+                    detected_gesture = "TONGUE OUT!"
+                
+                # Priority 2: Showing teeth (big smile)
+                elif is_showing_teeth(face_landmarks):
+                    current_meme = loaded_images['teeth'].copy()
+                    detected_gesture = "TEETH SHOWING!"
+                
+                # Priority 3: Normal face
                 else:
-                    # No tongue - show normal meme
-                    current_meme = apple_img.copy()
-                    
-                    # Add status text (yellow text)
-                    cv2.putText(frame, "No tongue detected", (10, 50), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    current_meme = loaded_images['normal'].copy()
+                    detected_gesture = "Normal face"
+        
+        # No face or hands detected
         else:
-            # No face detected in frame
-            current_meme = apple_img.copy()
+            current_meme = loaded_images['normal'].copy()
+            detected_gesture = "No face detected"
+        
+        # ====================================================================
+        # Display status on camera feed
+        # ====================================================================
+        
+        # Choose color based on detection
+        if "FINGER" in detected_gesture:
+            color = (255, 0, 255)  # Magenta for fingers
+        elif "TONGUE" in detected_gesture:
+            color = (0, 255, 0)    # Green for tongue
+        elif "TEETH" in detected_gesture:
+            color = (0, 255, 255)  # Yellow for teeth
+        elif "Normal" in detected_gesture:
+            color = (255, 255, 0)  # Cyan for normal
+        else:
+            color = (0, 0, 255)    # Red for no detection
+        
+        cv2.putText(frame, detected_gesture, (10, 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+        
+        # Show debug info if enabled
+        if show_debug:
+            cv2.putText(frame, f"Press 'd' to hide debug", (10, WINDOW_HEIGHT - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
-            # Add warning text (red text)
-            cv2.putText(frame, "No face detected", (10, 50), 
-                      cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            if fingers_count > 0:
+                cv2.putText(frame, f"Fingers: {fingers_count}", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         
         # ====================================================================
         # Display windows
         # ====================================================================
         
-        # Show camera feed with detection status
         cv2.imshow('Camera Input', frame)
-        
-        # Show current meme image
-        cv2.imshow('Meme Output', current_meme)
+        cv2.imshow('Hamster Meme Output', current_meme)
         
         # ====================================================================
         # Handle keyboard input
         # ====================================================================
         
-        # Wait 1ms for key press, check if 'q' was pressed
-        # The & 0xFF is needed for compatibility with some systems
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == ord('q'):
             print("\n[QUIT] Quitting application...")
             break
+        elif key == ord('d'):
+            show_debug = not show_debug
+            print(f"[DEBUG] Debug mode: {'ON' if show_debug else 'OFF'}")
     
     # ========================================================================
-    # STEP 5: Cleanup and exit
+    # STEP 5: Cleanup
     # ========================================================================
     
-    # Release webcam
     cap.release()
-    
-    # Close all OpenCV windows
     cv2.destroyAllWindows()
-    
-    # Close MediaPipe Face Mesh
     face_mesh.close()
+    hands.close()
     
     print("[OK] Application closed successfully.")
-    print("Thanks for using Tongue Detection Meme Display!\n")
+    print("Thanks for using Enhanced Hamster Meme Display!\n")
 
 if __name__ == "__main__":
     main()
-
